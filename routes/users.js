@@ -12,7 +12,9 @@ router.get('/profile', authMiddleware, async (req, res) => {
   try {
     const result = await client.query(
       `SELECT u.user_id, u.first_name, u.last_name, u.phone, u.email, u.role,
-              h.*
+              u.hostel_id,
+              h.hostel_name, h.address,
+              h.phone AS hostel_phone, h.email AS hostel_email
        FROM users u
        JOIN hostel h ON u.hostel_id = h.hostel_id
        WHERE u.user_id = $1`,

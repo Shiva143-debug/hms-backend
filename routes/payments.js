@@ -27,17 +27,27 @@ router.post('/generate-invoice', authMiddleware, async (req, res) => {
     }
 
     const monthlyRent = parseFloat(allocRes.rows[0].price_monthly) || 0;
-    const invoiceNo = 'INV-' + Date.now();
+    const numericAmount = amount == null || amount === '' ? monthlyRent : Number(amount);
+
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({ message: 'Invoice amount must be greater than zero' });
+    }
 
     const due = dueDate
       ? new Date(dueDate)
       : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
+    if (Number.isNaN(due.getTime())) {
+      return res.status(400).json({ message: 'Invalid due date' });
+    }
+
+    const invoiceNo = 'INV-' + Date.now();
+
     const invoiceRes = await client.query(
       `INSERT INTO invoice (hosteler_id, invoice_no, amount, due_date, status)
        VALUES ($1, $2, $3, $4, 'pending')
        RETURNING *`,
-      [hostelerId, invoiceNo, amount || monthlyRent, due]
+      [hostelerId, invoiceNo, numericAmount, due]
     );
 
     res.status(201).json({
@@ -161,7 +171,15 @@ router.get('/hosteler/:hostelerId/invoices', authMiddleware, async (req, res) =>
 
   try {
     const invoices = await client.query(
-      `SELECT * FROM invoice WHERE hosteler_id = $1 ORDER BY due_date DESC`,
+      `SELECT i.*,
+              COALESCE((
+                SELECT SUM(p.amount)
+                FROM payment p
+                WHERE p.invoice_id = i.invoice_id
+              ), 0)::numeric AS amount_paid
+       FROM invoice i
+       WHERE i.hosteler_id = $1
+       ORDER BY i.due_date DESC`,
       [hostelerId]
     );
 
@@ -194,13 +212,26 @@ router.post('/payment', authMiddleware, async (req, res) => {
   const { invoiceId, amount, mode, reference } = req.body;
 
   try {
-    if (!invoiceId || !amount) {
-      return res.status(400).json({ message: 'invoiceId and amount are required' });
+    const numericAmount = Number(amount);
+    if (!invoiceId || !numericAmount || numericAmount <= 0) {
+      return res.status(400).json({ message: 'A valid invoiceId and amount are required' });
+    }
+
+    await client.query('BEGIN');
+
+    const invoiceRes = await client.query(
+      'SELECT amount FROM invoice WHERE invoice_id = $1',
+      [invoiceId]
+    );
+
+    if (invoiceRes.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Invoice not found' });
     }
 
     await client.query(
       'INSERT INTO payment (invoice_id, amount, mode, reference_no) VALUES ($1, $2, $3, $4)',
-      [invoiceId, amount, mode || 'cash', reference || null]
+      [invoiceId, numericAmount, mode || 'cash', reference || null]
     );
 
     const sumRes = await client.query(
@@ -209,28 +240,25 @@ router.post('/payment', authMiddleware, async (req, res) => {
     );
 
     const paid = parseFloat(sumRes.rows[0].paid);
-
-    const invoiceRes = await client.query(
-      'SELECT amount FROM invoice WHERE invoice_id = $1',
-      [invoiceId]
-    );
-
-    if (invoiceRes.rowCount === 0) {
-      return res.status(404).json({ message: 'Invoice not found' });
-    }
-
     const total = parseFloat(invoiceRes.rows[0].amount);
     let status = 'pending';
     if (paid >= total) status = 'paid';
     else if (paid > 0) status = 'partial';
 
     await client.query(
-      "UPDATE invoice SET status = $1 WHERE invoice_id = $2",
+      'UPDATE invoice SET status = $1 WHERE invoice_id = $2',
       [status, invoiceId]
     );
 
+    await client.query('COMMIT');
+
     res.json({ message: 'Payment recorded', status, paid, total });
   } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackErr) {
+      // ignore
+    }
     console.error(err);
     res.status(500).json({ message: 'Payment failed' });
   } finally {

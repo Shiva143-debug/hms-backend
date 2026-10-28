@@ -81,11 +81,11 @@ router.post('/send-reminders', authMiddleware, async (req, res) => {
       : `i.due_date <= (CURRENT_DATE + 1)`;
 
     const pending = await client.query(
-      `SELECT DISTINCT
+      `SELECT
+         i.invoice_id, i.invoice_no, i.due_date,
          h.hosteler_id, h.first_name, h.last_name, h.phone, h.email,
          r.room_no, b.bed_number,
-         i.amount, i.due_date,
-         COALESCE(SUM(p.amount), 0)::numeric AS paid
+         (i.amount - COALESCE(SUM(p.amount), 0))::numeric AS amount_due
        FROM invoice i
        JOIN hosteler h ON i.hosteler_id = h.hosteler_id
        LEFT JOIN allocation a ON a.hosteler_id = h.hosteler_id AND a.status = 'active'
@@ -93,9 +93,11 @@ router.post('/send-reminders', authMiddleware, async (req, res) => {
        LEFT JOIN room r ON b.room_id = r.room_id
        LEFT JOIN payment p ON p.invoice_id = i.invoice_id
        WHERE i.status <> 'paid' AND ${dueCondition}
-       GROUP BY h.hosteler_id, h.first_name, h.last_name, h.phone, h.email,
-                r.room_no, b.bed_number, i.amount, i.due_date
-       ORDER BY h.first_name`
+       GROUP BY i.invoice_id, i.invoice_no, i.due_date,
+                h.hosteler_id, h.first_name, h.last_name, h.phone, h.email,
+                r.room_no, b.bed_number, i.amount
+       HAVING i.amount - COALESCE(SUM(p.amount), 0) > 0
+       ORDER BY h.first_name, i.due_date`
     );
 
     if (pending.rowCount === 0) {
@@ -112,7 +114,7 @@ router.post('/send-reminders', authMiddleware, async (req, res) => {
       const text = [
         `Dear ${row.first_name} ${row.last_name || ''},`,
         '',
-        `This is a friendly reminder that your hostel rent of ₹${row.amount} ` +
+        `This is a friendly reminder that your hostel rent of ₹${Number(row.amount_due).toFixed(2)} ` +
           `(Room ${row.room_no || '—'}, Bed ${row.bed_number || '—'}) is ${
             dueLeft < 0 ? `${Math.abs(dueLeft)} day(s) overdue` : `due in ${dueLeft} day(s)`
           }.`,
@@ -125,7 +127,7 @@ router.post('/send-reminders', authMiddleware, async (req, res) => {
         try {
           await sendEmail(
             row.email,
-            `Rent reminder • Invoice ${row.amount}`,
+            `Rent reminder • ${row.invoice_no}`,
             text
           );
           await client.query(

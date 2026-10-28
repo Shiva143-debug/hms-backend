@@ -74,12 +74,17 @@ router.get('/get-bed/:id', authMiddleware, async (req, res) => {
       FROM bed b
       JOIN room r ON b.room_id = r.room_id
       JOIN floor f ON r.floor_id = f.floor_id
-      where b.bed_id = ${id}
+      WHERE b.bed_id = $1
       ORDER BY b.bed_id
-    `);
+    `, [id]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: 'Bed not found' });
+        }
 
         res.json({
-            message: 'Beds fetched successfully',
+            message: 'Bed fetched successfully',
+            bed: toCamel(result.rows[0]),
             beds: result.rows.map(toCamel)
         });
 
@@ -119,13 +124,13 @@ router.put('/update-bed/:id', authMiddleware, async (req, res) => {
     const { bedNumber, status } = req.body;
 
     try {
-        const result = await client.query(
+        const result = await query(
             `UPDATE bed
-       SET bed_number = $1,
-           status = $2
+       SET bed_number = COALESCE($1, bed_number),
+           status = COALESCE($2, status)
        WHERE bed_id = $3
        RETURNING *`,
-            [bedNumber, status || 'empty', id]
+            [bedNumber || null, status || null, id]
         );
 
         if (result.rows.length === 0)

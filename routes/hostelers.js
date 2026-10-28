@@ -7,21 +7,28 @@ const router = express.Router();
 
 router.post('/add-hosteler', authMiddleware, async (req, res) => {
     const { firstName, lastName, phone, email, idProof } = req.body;
+    const cleanFirst = String(firstName || '').trim();
+    const cleanPhone = String(phone || '').trim();
+
+    if (!cleanFirst || !cleanPhone) {
+        return res.status(400).json({ message: 'First name and phone are required' });
+    }
 
     try {
         const result = await query(
             `INSERT INTO hosteler (first_name, last_name, phone, email, id_proof)
        VALUES ($1,$2,$3,$4,$5)
        RETURNING *`,
-            [firstName, lastName, phone, email, idProof]
+            [cleanFirst, lastName || null, cleanPhone, email || null, idProof || null]
         );
 
         res.status(201).json({
             message: 'Hosteler added successfully',
-            hosteler: result.rows[0]
+            hosteler: toCamel(result.rows[0])
         });
 
     } catch (err) {
+        console.error(err);
         res.status(500).json({ message: 'Error adding hosteler' });
     } 
 });
@@ -30,6 +37,12 @@ router.put('/update-hosteler/:id', authMiddleware, async (req, res) => {
     // const client = req.dbClient;
     const { id } = req.params;
     const { firstName, lastName, phone, email, idProof } = req.body;
+    const cleanFirst = String(firstName || '').trim();
+    const cleanPhone = String(phone || '').trim();
+
+    if (!cleanFirst || !cleanPhone) {
+        return res.status(400).json({ message: 'First name and phone are required' });
+    }
 
     try {
         const result = await query(
@@ -41,7 +54,7 @@ router.put('/update-hosteler/:id', authMiddleware, async (req, res) => {
                  id_proof = $5
              WHERE hosteler_id = $6
              RETURNING *`,
-            [firstName, lastName, phone, email, idProof, id]
+            [cleanFirst, lastName || null, cleanPhone, email || null, idProof || null, id]
         );
 
         if (result.rows.length === 0)
@@ -143,22 +156,41 @@ router.delete('/delete-hosteler/:id', authMiddleware, async (req, res) => {
     }
 });
 
+async function rollbackQuietly(client) {
+    try {
+        await client.query('ROLLBACK');
+    } catch (rollbackErr) {
+        console.error('Rollback failed', rollbackErr.message);
+    }
+}
+
 router.post('/check-in', authMiddleware, async (req, res) => {
-    // const client = req.dbClient;
+    const client = req.dbClient;
     const { hostelerId, roomId, bedId, checkInDate } = req.body;
 
     try {
-        await query('BEGIN');
+        await client.query('BEGIN');
 
-        const bed = await query(
-            `SELECT status FROM bed WHERE bed_id = $1`,
+        const bed = await client.query(
+            `SELECT status, room_id FROM bed WHERE bed_id = $1`,
             [bedId]
         );
 
-        if (!bed.rows.length || bed.rows[0].status !== 'available')
+        if (!bed.rows.length || bed.rows[0].status === 'occupied')
             throw new Error('Bed is not available');
 
-        const activeAllocation = await query(
+        if (String(bed.rows[0].room_id) !== String(roomId))
+            throw new Error('Bed does not belong to the selected room');
+
+        const bedAllocation = await client.query(
+            `SELECT 1 FROM allocation WHERE bed_id = $1 AND status = 'active'`,
+            [bedId]
+        );
+
+        if (bedAllocation.rows.length)
+            throw new Error('Bed already has an active stay');
+
+        const activeAllocation = await client.query(
             `SELECT 1 FROM allocation WHERE hosteler_id = $1 AND status = 'active'`,
             [hostelerId]
         );
@@ -166,35 +198,35 @@ router.post('/check-in', authMiddleware, async (req, res) => {
         if (activeAllocation.rows.length)
             throw new Error('Hosteler already has an active allocation');
 
-        await query(
+        await client.query(
             `INSERT INTO allocation (hosteler_id, room_id, bed_id, check_in_date)
              VALUES ($1, $2, $3, $4)`,
             [hostelerId, roomId, bedId, checkInDate]
         );
 
-        await query(
+        await client.query(
             `UPDATE bed SET status = 'occupied' WHERE bed_id = $1`,
             [bedId]
         );
 
-        await query('COMMIT');
+        await client.query('COMMIT');
 
         res.json({status:"success" ,message: 'Check-in successful' });
 
     } catch (err) {
-        await query('ROLLBACK');
+        await rollbackQuietly(client);
         res.status(400).json({status:"fail" ,message: err.message });
     }
 });
 
 router.post('/check-out', authMiddleware, async (req, res) => {
-    // const client = req.dbClient;
+    const client = req.dbClient;
     const { allocationId, checkOutDate } = req.body;
 
     try {
-        await query('BEGIN');
+        await client.query('BEGIN');
 
-        const allocation = await query(
+        const allocation = await client.query(
             `SELECT bed_id FROM allocation WHERE allocation_id = $1 AND status = 'active'`,
             [allocationId]
         );
@@ -204,28 +236,26 @@ router.post('/check-out', authMiddleware, async (req, res) => {
 
         const bedId = allocation.rows[0].bed_id;
 
-        await query(
+        await client.query(
             `UPDATE allocation
              SET status = 'left', check_out_date = $1
              WHERE allocation_id = $2`,
             [checkOutDate, allocationId]
         );
 
-        await query(
+        await client.query(
             `UPDATE bed SET status = 'available' WHERE bed_id = $1`,
             [bedId]
         );
 
-        await query('COMMIT');
+        await client.query('COMMIT');
 
-        res.json({staus:"success" ,message: 'Check-out successful' });
+        res.json({ status: 'success', message: 'Check-out successful' });
 
     } catch (err) {
-        await query('ROLLBACK');
+        await rollbackQuietly(client);
         res.status(400).json({ message: err.message });
     } 
 });
-
-module.exports = router;
 
 module.exports = router;

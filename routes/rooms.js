@@ -8,13 +8,18 @@ const router = express.Router();
 router.post('/add-room', authMiddleware, async (req, res) => {
   
   const { floorId, roomNumber, roomTypeId,  priceMonthly, priceDaily } = req.body;
+  const cleanRoomNo = String(roomNumber || '').trim();
+
+  if (!floorId || !cleanRoomNo || !roomTypeId) {
+    return res.status(400).json({ message: 'floorId, roomNumber and roomTypeId are required' });
+  }
 
   try {
     const result = await query(
       `INSERT INTO room (floor_id, room_no, room_type_id, price_monthly, price_daily)
        VALUES ($1,$2,$3,$4,$5)
        RETURNING *`,
-      [floorId, roomNumber, roomTypeId, priceMonthly, priceDaily]
+      [floorId, cleanRoomNo, roomTypeId, Number(priceMonthly) || 0, Number(priceDaily) || 0]
     );
 
     res.status(201).json({
@@ -33,10 +38,26 @@ router.get('/get-rooms', authMiddleware, async (req, res) => {
 
   try {
     const result = await client.query(`
-      SELECT r.*, f.floor_no, rt.type_name
+      SELECT r.room_id, r.floor_id, r.room_no, r.room_type_id,
+             r.price_monthly, r.price_daily, r.created_at,
+             f.floor_no, rt.type_name,
+             COALESCE(b.total_beds, 0) AS total_beds,
+             COALESCE(b.occupied_beds, 0) AS occupied_beds,
+             CASE
+               WHEN COALESCE(b.total_beds, 0) = 0 THEN 'available'
+               WHEN b.occupied_beds >= b.total_beds THEN 'full'
+               ELSE 'available'
+             END AS status
       FROM room r
       LEFT JOIN floor f ON r.floor_id = f.floor_id
       LEFT JOIN room_type rt ON r.room_type_id = rt.room_type_id
+      LEFT JOIN (
+        SELECT room_id,
+               COUNT(*)::int AS total_beds,
+               COUNT(*) FILTER (WHERE status = 'occupied')::int AS occupied_beds
+        FROM bed
+        GROUP BY room_id
+      ) b ON b.room_id = r.room_id
       ORDER BY r.room_id
     `);
 
@@ -59,10 +80,26 @@ router.get('/get-room/:id', authMiddleware, async (req, res) => {
 
   try {
     const result = await client.query(
-      `SELECT r.*, f.floor_no, rt.type_name
+      `SELECT r.room_id, r.floor_id, r.room_no, r.room_type_id,
+              r.price_monthly, r.price_daily, r.created_at,
+              f.floor_no, rt.type_name,
+              COALESCE(b.total_beds, 0) AS total_beds,
+              COALESCE(b.occupied_beds, 0) AS occupied_beds,
+              CASE
+                WHEN COALESCE(b.total_beds, 0) = 0 THEN 'available'
+                WHEN b.occupied_beds >= b.total_beds THEN 'full'
+                ELSE 'available'
+              END AS status
        FROM room r
        LEFT JOIN floor f ON r.floor_id = f.floor_id
        LEFT JOIN room_type rt ON r.room_type_id = rt.room_type_id
+       LEFT JOIN (
+         SELECT room_id,
+                COUNT(*)::int AS total_beds,
+                COUNT(*) FILTER (WHERE status = 'occupied')::int AS occupied_beds
+         FROM bed
+         GROUP BY room_id
+       ) b ON b.room_id = r.room_id
        WHERE r.room_id = $1`,
       [id]
     );
@@ -83,7 +120,12 @@ router.get('/get-room/:id', authMiddleware, async (req, res) => {
 router.put('/update-room/:id', authMiddleware, async (req, res) => {
   const client = req.dbClient;
   const { id } = req.params;
-  const { floorId, roomNumber, roomTypeId, capacity, priceMonthly, priceDaily } = req.body;
+  const { floorId, roomNumber, roomTypeId, priceMonthly, priceDaily } = req.body;
+  const cleanRoomNo = String(roomNumber || '').trim();
+
+  if (!floorId || !cleanRoomNo || !roomTypeId) {
+    return res.status(400).json({ message: 'floorId, roomNumber and roomTypeId are required' });
+  }
 
   try {
     const result = await query(
@@ -95,7 +137,7 @@ router.put('/update-room/:id', authMiddleware, async (req, res) => {
            price_daily = $5
        WHERE room_id = $6
        RETURNING *`,
-      [floorId, roomNumber, roomTypeId, priceMonthly, priceDaily, id]
+      [floorId, cleanRoomNo, roomTypeId, Number(priceMonthly) || 0, Number(priceDaily) || 0, id]
     );
 
     if (result.rows.length === 0)
@@ -131,7 +173,12 @@ router.delete('/delete-room/:id', authMiddleware, async (req, res) => {
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: 'Error deleting room' });
+    res.status(err.code === '23503' ? 400 : 500).json({
+      message:
+        err.code === '23503'
+          ? 'Cannot delete room: remove its beds and allocations first'
+          : 'Error deleting room',
+    });
   } finally {
     client.release();
   }

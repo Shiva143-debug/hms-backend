@@ -14,13 +14,18 @@ router.get('/dashboard', authMiddleware, async (req, res) => {
             client.query('SELECT COUNT(*)::int AS count FROM room'),
             client.query('SELECT COUNT(*)::int AS count FROM bed'),
             client.query(`SELECT COUNT(*)::int AS count FROM allocation WHERE status = 'active'`),
-            client.query(`SELECT COUNT(*)::int AS count FROM hosteler WHERE status = 'active'`),
+            client.query(`SELECT COUNT(*)::int AS count FROM allocation WHERE status = 'active'`),
             client.query(
                 `SELECT
-                    COALESCE(SUM(CASE WHEN status <> 'paid' THEN amount ELSE 0 END), 0)::numeric AS pending_amount,
-                    COUNT(*) FILTER (WHERE status <> 'paid' AND due_date < CURRENT_DATE)::int AS overdue_count,
-                    COUNT(*) FILTER (WHERE status <> 'paid' AND due_date BETWEEN (CURRENT_DATE - 1) AND (CURRENT_DATE + 1))::int AS due_soon_count
-                 FROM invoice`
+                    COALESCE(SUM(GREATEST(i.amount - COALESCE(p.paid, 0), 0)), 0)::numeric AS pending_amount,
+                    COUNT(*) FILTER (WHERE i.amount - COALESCE(p.paid, 0) > 0 AND i.due_date < CURRENT_DATE)::int AS overdue_count,
+                    COUNT(*) FILTER (WHERE i.amount - COALESCE(p.paid, 0) > 0 AND i.due_date BETWEEN (CURRENT_DATE - 1) AND (CURRENT_DATE + 1))::int AS due_soon_count
+                 FROM invoice i
+                 LEFT JOIN (
+                    SELECT invoice_id, SUM(amount)::numeric AS paid
+                    FROM payment
+                    GROUP BY invoice_id
+                 ) p ON p.invoice_id = i.invoice_id`
             ),
             client.query('SELECT COALESCE(SUM(amount), 0)::numeric AS collected FROM payment')
         ]);
@@ -71,7 +76,9 @@ router.get('/hostel-stats', authMiddleware, async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Error fetching hostel stats' });
-    } 
+    } finally {
+        client.release();
+    }
 });
 
 // Stats based on floor_id: rooms, beds, active hostelers
